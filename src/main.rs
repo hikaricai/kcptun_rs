@@ -34,14 +34,14 @@ fn run_server(){
             info!("new tcp");
             let fut = Connection::new(sock,Config::default(),Mode::Server)
                 .for_each(|mux_stream|{
-                    let (mux_sink,mux_stream) = Framed::new(mux_stream, BytesCodec::new()).split();
+                    let (mux_rd,mux_wr) = mux_stream.split();
                     let addr = "127.0.0.1:22".parse::<SocketAddr>().unwrap();
                     let fut = TcpStream::connect(&addr).map_err(|_|{}).and_then(move|tcp_stream|{
                         info!("tcp connected");
-                        let (tcp_sink,tcp_stream) = Framed::new(tcp_stream, BytesCodec::new()).split();
-                        let cp1 = mux_stream.map(BytesMut::freeze).forward(tcp_sink);
-                        let cp2 = tcp_stream.map(BytesMut::freeze).forward(mux_sink);
-                        cp1.join(cp2).map_err(|_|{})
+                        let (tcp_rd,tcp_wr) = tcp_stream.split();
+                        let cp1 = tio::copy(tcp_rd,mux_wr);
+                        let cp2 = tio::copy(mux_rd,tcp_wr);
+                        cp1.join(cp2).map_err(|err|{error!("err copy {}",err)})//can not change the order,but why?
                     }).map(|_|{});
                     tokio::spawn(fut);
                     Ok(())
@@ -72,15 +72,15 @@ fn run_client(){
         .map_err(|e| eprintln!("accept failed = {:?}", e))
         .for_each(move|tcp_stream| {
             info!("new tcp");
-            let (tcp_sink,tcp_stream) = Framed::new(tcp_stream, BytesCodec::new()).split();
+            let (tcp_rd,tcp_wr) = tcp_stream.split();
             let (mess_tx,mess_rx) = oneshot::channel();
             let fut = tx.clone().send(mess_tx).map_err(|_|{}).and_then(|_|{
                 mess_rx.map_err(|_|{}).and_then(move|mux_stream|{
                     info!("get mux stream");
-                    let (mux_sink,mux_stream) = Framed::new(mux_stream, BytesCodec::new()).split();
-                    let cp1 = mux_stream.map(BytesMut::freeze).forward(tcp_sink);
-                    let cp2 = tcp_stream.map(BytesMut::freeze).forward(mux_sink);
-                    cp1.join(cp2).map_err(|e|{})
+                    let (mux_rd,mux_wr) = mux_stream.split();
+                    let cp1 = tio::copy(tcp_rd,mux_wr);
+                    let cp2 = tio::copy(mux_rd,tcp_wr);
+                    cp1.join(cp2).map_err(|err|{error!("err copy {}",err)})//can not use cp2.join(cp1),but why?
                 })
             }).map(|_|{});
             tokio::spawn(fut);
