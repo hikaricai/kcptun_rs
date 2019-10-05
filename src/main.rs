@@ -61,38 +61,30 @@ fn main() {
     env_logger::init();
     if std::env::args().nth(1) == Some("server".to_string()) {
         info!("Starting server ......");
+        //kcp_server();
         kcp_server();
     } else {
         info!("Starting client ......");
+        //kcp_client();
         kcp_client();
     }
 }
 
 fn run_server(){
-    let mut rt = Core::new().unwrap();
-    let handle = rt.handle();
+    let mut rt = Runtime::new().unwrap();
 
     let addr = "127.0.0.1:12345".parse().unwrap();
-    let mode = std::env::args().nth(2).unwrap_or_else(|| "default".to_string());
-    let mode = match &mode[..] {
-        "default" => TestMode::Default,
-        "normal" => TestMode::Normal,
-        "fast" => TestMode::Fast,
-        _ => panic!("Unrecognized mode {}", mode),
-    };
 
-    let config = get_config(mode);
-    let listener = KcpListener::bind_with_config(&addr, &handle, config).unwrap();
+    let listener = kcp::KcpListener::bind(&addr).unwrap();
     let server = listener
         .incoming()
         .map_err(|e| eprintln!("accept failed = {:?}", e))
-        .for_each(move|(sock,addr)| {
+        .for_each(move|kcp_server_stream| {
             info!("new tcp");
-            let handle_clone = handle.clone();
-            let fut = Connection::new(sock,Config::default(),Mode::Server)
+            let fut = Connection::new(kcp_server_stream,Config::default(),Mode::Server)
                 .for_each(move|mux_stream|{
                     let (mux_rd,mux_wr) = mux_stream.split();
-                    let addr = "127.0.0.1:22".parse::<SocketAddr>().unwrap();
+                    let addr = "127.0.0.1:2333".parse::<SocketAddr>().unwrap();
                     let fut = TcpStream::connect(&addr).map_err(|_|{}).and_then(move|tcp_stream|{
                         info!("tcp connected");
                         let (tcp_rd,tcp_wr) = tcp_stream.split();
@@ -100,25 +92,23 @@ fn run_server(){
                         let cp2 = io::copy(mux_rd,tcp_wr);
                         cp1.join(cp2).map_err(|err|{error!("err copy {}",err)})//can not use cp2.join(cp1),but why?
                     }).map(|_|{});
-                    handle_clone.spawn(fut);
+                    tokio::spawn(fut);
                     Ok(())
                 })
                 .map_err(|err|{
                     error!("tcp server stream error: {:?}", err);
                     ()
                 });
-            handle.spawn(fut);
+            tokio::spawn(fut);
             Ok(())
         });
-    rt.run(server);
+    rt.block_on(server);
 }
 
-type OpenMuxStreamMess = oneshot::Sender<StreamHandle<KcpStream>>;
+type OpenMuxStreamMess = oneshot::Sender<StreamHandle<kcp::KcpStream>>;
 
 fn run_client(){
-    let mut rt = Core::new().unwrap();
-    let handle = rt.handle();
-    let handle_clone = handle.clone();
+    let mut rt = Runtime::new().unwrap();
     let (tx,rx) = mpsc::channel::<OpenMuxStreamMess>(16);
 
     let addr = "127.0.0.1:10022".parse().unwrap();
@@ -140,13 +130,12 @@ fn run_client(){
                     cp1.join(cp2).map_err(|err|{error!("err copy {}",err)})//can not use cp2.join(cp1),but why?
                 })
             }).map(|_|{});
-            handle_clone.spawn(fut);
+            tokio::spawn(fut);
             Ok(())
         });
 
-    let mut updater = KcpSessionManager::new(&handle).unwrap();
     let addr = "127.0.0.1:12345".parse().unwrap();
-    let mux_client = futures::lazy(||{KcpStream::connect(0, &addr, &handle, &mut updater)})
+    let mux_client = kcp::KcpStream::connect(&addr)
         .map_err(|e|{})
         .and_then(move|kcp_stream|{
         info!("mux connected");
@@ -158,7 +147,7 @@ fn run_client(){
             Ok(())
         }).map_err(|_|{})
     });
-    rt.run(tcp_server.join(mux_client));
+    rt.block_on(tcp_server.join(mux_client));
 }
 
 
@@ -175,12 +164,6 @@ fn kcp_server(){
         }).map_err(|e|{
             error!("copy err {}",e);
         });
-//        let mut v = vec![0;100];
-//        let cp = io::read_exact(stream,v)
-//            .and_then(|ret|{
-//                println!("read {:?}",ret.1);
-//                io::write_all(ret.0,ret.1)
-//            }).map(|_|{}).map_err(|_|{});
         tokio::spawn(cp);
         Ok(())
     });

@@ -90,8 +90,8 @@ impl Stream for Incoming {
                         peer: datagram.peer.clone(),
                     },
                 );
-                kcb.wndsize(128, 128);
-                kcb.nodelay(1, 10, 0, true);
+                kcb.wndsize(1024, 1024);
+                kcb.nodelay(1, 10, 1, true);
                 let kcb = Arc::new(Mutex::new(kcb));
                 let kcb_clone = kcb.clone();
                 let (mut tx,rx) = mpsc::channel(1024);
@@ -139,7 +139,9 @@ fn delay_fut(){
 impl Read for KcpServerStream{
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
         loop {
-            match self.rx.poll() {
+            let ret = self.rx.poll();
+            println!("read {:?}",ret);
+            match ret {
                 Ok(Async::Ready(Some(datagram)))=> {
                     let mut kcb = self.kcb.lock().unwrap();
                     kcb.input(datagram.data.as_slice());
@@ -160,7 +162,9 @@ impl Read for KcpServerStream{
 impl Write for KcpServerStream{
     fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
         let mut kcb = self.kcb.lock().unwrap();
-        let size = kcb.send(buf)?;
+        let size = kcb.send(buf);
+        println!("write {:?}",size);
+        let size = size?;
         kcb.update(clock());
         kcb.flush();
         Ok(size)
@@ -223,7 +227,7 @@ impl KcpStream{
                 peer: addr.clone(),
             },
         );
-        kcb.wndsize(128, 128);
+        kcb.wndsize(1024, 1024);
         kcb.nodelay(1, 10, 0, true);
         let kcp_stream = Self{
             kcb:Arc::new(Mutex::new(kcb)),
@@ -239,6 +243,7 @@ impl Read for KcpStream{
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
         loop{
             let ret = self.datagrams.poll();//must run in tokio runtime?
+            println!("read {:?}",ret);
             match ret {
                 Ok(Async::Ready(Some(datagram)))=> {
                     let mut kcb = self.kcb.lock().unwrap();
@@ -260,7 +265,9 @@ impl Read for KcpStream{
 impl Write for KcpStream{
     fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
         let mut kcb = self.kcb.lock().unwrap();
-        let size = kcb.send(buf)?;
+        let size = kcb.send(buf);
+        println!("write {:?}",size);
+        let size = size?;
         kcb.update(clock());
         kcb.flush();
         Ok(size)
