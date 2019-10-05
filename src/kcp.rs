@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use tokio_io::{AsyncRead, AsyncWrite};
 use time;
-use crate::kcb::Kcb;
+use kcp::{Error as KcpError, Kcp, KcpResult, get_conv};
 use std::sync::{Arc, Mutex};
 use bytes::{Buf, BufMut, ByteOrder, LittleEndian};
 use std::time::{Duration, Instant};
@@ -71,6 +71,7 @@ impl Stream for Incoming {
                 self.datagrams.poll()
             }.unwrap();
             let peer = datagram.peer.clone();
+            println!("datagram size {}",datagram.data.len());
             if self.inner.connections.contains_key(&datagram.peer){
                 if let Some( mut tx) = self.inner.connections.remove(&datagram.peer){
                     match tx.send(datagram).wait() {
@@ -83,18 +84,18 @@ impl Stream for Incoming {
                 }
             }else{
                 let conv = LittleEndian::read_u32(&datagram.data[..4]);
-                let mut kcb = Kcb::new(
+                let mut kcp = Kcp::new(
                     conv,
                     KcpOutput {
                         udp: self.inner.udp.clone(),
                         peer: datagram.peer.clone(),
                     },
                 );
-                kcb.wndsize(1024, 1024);
-                kcb.nodelay(1, 10, 1, true);
-                let kcb = Arc::new(Mutex::new(kcb));
-                let kcb_clone = kcb.clone();
-                let (mut tx,rx) = mpsc::channel(1024);
+                kcp.set_mtu(1000);//the udpsocket2 only support 1024
+                kcp.set_wndsize(1024,1024);
+                let kcp = Arc::new(Mutex::new(kcp));
+                let kcp_clone = kcp.clone();
+                let (mut tx,rx) = mpsc::channel(10240);
                 match tx.send(datagram).wait() {
                     Ok(s) => tx = s,
                     Err(_) => return Ok(Async::NotReady)
@@ -102,17 +103,17 @@ impl Stream for Incoming {
                 self.inner.connections.insert(peer,tx);
                 let tcb_flush_fut = Interval::new_interval(Duration::from_millis(10))
                     .for_each(move|_|{
-                        let mut kcb = kcb_clone.lock().unwrap();
-                        kcb.update(clock());
-                        let dur = kcb.check(clock());
-                        kcb.flush();
+                        let mut kcp = kcp_clone.lock().unwrap();
+                        kcp.update(clock());
+                        let dur = kcp.check(clock());
+                        kcp.flush();
                         Ok(())
                     }).map_err(|e_|{});
                 tokio::spawn(tcb_flush_fut);
                 return Ok(Async::Ready(Some(
                     KcpServerStream{
                         rx,
-                        kcb,
+                        kcp,
                     }
                 )))
             }
@@ -122,7 +123,7 @@ impl Stream for Incoming {
 
 pub struct KcpServerStream {
     rx:Receiver<UdpDatagram>,
-    kcb:Arc<Mutex<Kcb<KcpOutput>>>,
+    kcp:Arc<Mutex<Kcp<KcpOutput>>>,
 }
 fn delay_fut(){
     let curr = task::current();
@@ -143,9 +144,12 @@ impl Read for KcpServerStream{
             println!("read {:?}",ret);
             match ret {
                 Ok(Async::Ready(Some(datagram)))=> {
-                    let mut kcb = self.kcb.lock().unwrap();
+                    let mut kcb = self.kcp.lock().unwrap();
                     kcb.input(datagram.data.as_slice());
                     let size = kcb.recv(buf);
+                    let peek = kcb.peeksize();
+                    println!("kcp peeksize {:?}",peek);
+                    println!("kcp recv {:?}",size);
                     if size.is_ok(){
                         let size = size?;
                         return Ok(size);
@@ -161,7 +165,7 @@ impl Read for KcpServerStream{
 
 impl Write for KcpServerStream{
     fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
-        let mut kcb = self.kcb.lock().unwrap();
+        let mut kcb = self.kcp.lock().unwrap();
         let size = kcb.send(buf);
         println!("write {:?}",size);
         let size = size?;
@@ -196,7 +200,7 @@ impl Future for KcpStreamWrapper {
 
     fn poll(&mut self) -> Poll<KcpStream, io::Error> {
         let kcp_stream = self.inner.take().unwrap();
-        let kcb =kcp_stream.kcb.clone();
+        let kcb =kcp_stream.kcp.clone();
         let tcb_flush_fut = Interval::new_interval(Duration::from_millis(10))
             .for_each(move|_|{
                 let mut kcb = kcb.lock().unwrap();
@@ -211,7 +215,7 @@ impl Future for KcpStreamWrapper {
 }
 
 pub struct KcpStream {
-    kcb:Arc<Mutex<Kcb<KcpOutput>>>,
+    kcp:Arc<Mutex<Kcp<KcpOutput>>>,
     datagrams:udpsocket2::incoming::Incoming,
 }
 
@@ -220,17 +224,17 @@ impl KcpStream{
         let r: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let udp = UdpSocket::bind(&r).unwrap();
         let datagrams = udp.incoming();
-        let mut kcb = Kcb::new(
+        let mut kcp = Kcp::new(
             0,
             KcpOutput {
                 udp: udp,
                 peer: addr.clone(),
             },
         );
-        kcb.wndsize(1024, 1024);
-        kcb.nodelay(1, 10, 0, true);
+        kcp.set_mtu(1000);
+        kcp.set_wndsize(1024,1024);
         let kcp_stream = Self{
-            kcb:Arc::new(Mutex::new(kcb)),
+            kcp:Arc::new(Mutex::new(kcp)),
             datagrams,
         };
         KcpStreamWrapper{
@@ -246,9 +250,10 @@ impl Read for KcpStream{
             println!("read {:?}",ret);
             match ret {
                 Ok(Async::Ready(Some(datagram)))=> {
-                    let mut kcb = self.kcb.lock().unwrap();
-                    kcb.input(datagram.data.as_slice());
-                    let size = kcb.recv(buf);
+                    let mut kcp = self.kcp.lock().unwrap();
+                    kcp.input(datagram.data.as_slice());
+                    let size = kcp.recv(buf);
+                    println!("kcp recv {:?}",size);
                     if size.is_ok(){
                         let size = size?;
                         return Ok(size)
@@ -264,7 +269,7 @@ impl Read for KcpStream{
 
 impl Write for KcpStream{
     fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
-        let mut kcb = self.kcb.lock().unwrap();
+        let mut kcb = self.kcp.lock().unwrap();
         let size = kcb.send(buf);
         println!("write {:?}",size);
         let size = size?;

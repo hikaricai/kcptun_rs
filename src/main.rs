@@ -62,11 +62,11 @@ fn main() {
     if std::env::args().nth(1) == Some("server".to_string()) {
         info!("Starting server ......");
         //kcp_server();
-        kcp_server();
+        run_server();
     } else {
         info!("Starting client ......");
         //kcp_client();
-        kcp_client();
+        run_client();
     }
 }
 
@@ -84,7 +84,7 @@ fn run_server(){
             let fut = Connection::new(kcp_server_stream,Config::default(),Mode::Server)
                 .for_each(move|mux_stream|{
                     let (mux_rd,mux_wr) = mux_stream.split();
-                    let addr = "127.0.0.1:2333".parse::<SocketAddr>().unwrap();
+                    let addr = "127.0.0.1:22".parse::<SocketAddr>().unwrap();
                     let fut = TcpStream::connect(&addr).map_err(|_|{}).and_then(move|tcp_stream|{
                         info!("tcp connected");
                         let (tcp_rd,tcp_wr) = tcp_stream.split();
