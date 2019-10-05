@@ -1,17 +1,19 @@
 use yamux::{Config,Connection,Mode,ConnectionError,StreamHandle};
 use tokio::prelude::*;
 use tokio::net::{TcpListener,TcpStream};
-use tokio::io as tio;
+use tokio::io;
 use tokio::runtime::Runtime;
 use tokio::codec::{Framed};
 use tokio_codec::BytesCodec;
 use tokio_core::reactor::Core;
 use futures::sync::{mpsc,oneshot};
 use std::net::SocketAddr;
-use bytes::{Bytes, BytesMut};
+use bytes::{BytesMut, BufMut};
 use log::{error, info};
 use tokio_kcp::{KcpSessionManager, KcpStream, KcpConfig, KcpNoDelayConfig, KcpListener};
-
+use ::kcptun::kcp;
+use ::kcptun::kcp::{KcpStream as ks,KcpServerStream as kss};
+use tokio_io::{AsyncRead, AsyncWrite};
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum TestMode {
     Default,
@@ -59,10 +61,10 @@ fn main() {
     env_logger::init();
     if std::env::args().nth(1) == Some("server".to_string()) {
         info!("Starting server ......");
-        run_server();
+        kcp_server();
     } else {
         info!("Starting client ......");
-        run_client();
+        kcp_client();
     }
 }
 
@@ -81,7 +83,6 @@ fn run_server(){
 
     let config = get_config(mode);
     let listener = KcpListener::bind_with_config(&addr, &handle, config).unwrap();
-
     let server = listener
         .incoming()
         .map_err(|e| eprintln!("accept failed = {:?}", e))
@@ -95,9 +96,9 @@ fn run_server(){
                     let fut = TcpStream::connect(&addr).map_err(|_|{}).and_then(move|tcp_stream|{
                         info!("tcp connected");
                         let (tcp_rd,tcp_wr) = tcp_stream.split();
-                        let cp1 = tio::copy(tcp_rd,mux_wr);
-                        let cp2 = tio::copy(mux_rd,tcp_wr);
-                        cp1.join(cp2).map_err(|err|{error!("err copy {}",err)})//can not change the order,but why?
+                        let cp1 = io::copy(tcp_rd,mux_wr);
+                        let cp2 = io::copy(mux_rd,tcp_wr);
+                        cp1.join(cp2).map_err(|err|{error!("err copy {}",err)})//can not use cp2.join(cp1),but why?
                     }).map(|_|{});
                     handle_clone.spawn(fut);
                     Ok(())
@@ -134,8 +135,8 @@ fn run_client(){
                 mess_rx.map_err(|_|{}).and_then(move|mux_stream|{
                     info!("get mux stream");
                     let (mux_rd,mux_wr) = mux_stream.split();
-                    let cp1 = tio::copy(tcp_rd,mux_wr);
-                    let cp2 = tio::copy(mux_rd,tcp_wr);
+                    let cp1 = io::copy(tcp_rd,mux_wr);
+                    let cp2 = io::copy(mux_rd,tcp_wr);
                     cp1.join(cp2).map_err(|err|{error!("err copy {}",err)})//can not use cp2.join(cp1),but why?
                 })
             }).map(|_|{});
@@ -158,4 +159,72 @@ fn run_client(){
         }).map_err(|_|{})
     });
     rt.run(tcp_server.join(mux_client));
+}
+
+
+use futures::future::err;
+
+fn kcp_server(){
+    let mut rt = Runtime::new().unwrap();
+    let addr = "127.0.0.1:12345".parse().unwrap();
+    let incoming = kcp::KcpListener::bind(&addr).unwrap().incoming();
+    let fut = incoming.for_each(|stream|{
+        let (r,w) = stream.split();
+        let cp = tokio_io::io::copy(r,w).map(|size|{
+            info!("copied {} bytes",size.0);
+        }).map_err(|e|{
+            error!("copy err {}",e);
+        });
+//        let mut v = vec![0;100];
+//        let cp = io::read_exact(stream,v)
+//            .and_then(|ret|{
+//                println!("read {:?}",ret.1);
+//                io::write_all(ret.0,ret.1)
+//            }).map(|_|{}).map_err(|_|{});
+        tokio::spawn(cp);
+        Ok(())
+    });
+    rt.block_on(fut);
+}
+
+fn kcp_client(){
+    let mut stdout = std::io::stdout();
+    let (stdin_tx, stdin_rx) = mpsc::channel(0);
+    std::thread::spawn(|| read_stdin(stdin_tx));
+
+    let stdin_rx = stdin_rx.map(|v|BytesMut::from(v)).map_err(|_| panic!()); // errors not possible on rx
+
+    let mut rt = Runtime::new().unwrap();
+    let addr = "127.0.0.1:12345".parse().unwrap();
+    let stream_wrapper = ks::connect(&addr);
+    let fut = stream_wrapper.map_err(|_|{})
+        .and_then(move|stream|{
+            let (sink, stream) =  Framed::new(stream, BytesCodec::new()).split();
+            let send_stdin = stdin_rx.map(BytesMut::freeze).forward(sink);
+            let write_stdout = stream.for_each(move |buf| stdout.write_all(&buf));
+            let client= send_stdin
+                .map(|_| ())
+                .select(write_stdout.map(|_| ()));
+            client.map_err(|_|{})
+        });
+
+    rt.block_on(fut);
+
+}
+
+
+
+// Our helper method which will read data from stdin and send it along the
+// sender provided.
+fn read_stdin(mut tx: mpsc::Sender<Vec<u8>>) {
+    let mut stdin = std::io::stdin();
+    loop {
+        let mut buf = vec![0; 1024];
+        let n = match stdin.read(&mut buf) {
+            Err(_) | Ok(0) => break,
+            Ok(n) => n,
+        };
+        buf.truncate(n);
+        tx = tx.send(buf).wait().unwrap();
+    }
 }
