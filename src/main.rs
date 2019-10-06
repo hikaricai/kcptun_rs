@@ -14,58 +14,14 @@ use tokio_kcp::{KcpSessionManager, KcpStream, KcpConfig, KcpNoDelayConfig, KcpLi
 use ::kcptun::kcp;
 use ::kcptun::kcp::{KcpStream as ks,KcpServerStream as kss};
 use tokio_io::{AsyncRead, AsyncWrite};
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum TestMode {
-    Default,
-    Normal,
-    Fast,
-}
-
-fn get_config(mode: TestMode) -> KcpConfig {
-    let mut config = KcpConfig::default();
-    config.wnd_size = Some((128, 128));
-    match mode {
-        TestMode::Default => {
-            config.nodelay = Some(KcpNoDelayConfig {
-                nodelay: false,
-                interval: 10,
-                resend: 0,
-                nc: false,
-            });
-        }
-        TestMode::Normal => {
-            config.nodelay = Some(KcpNoDelayConfig {
-                nodelay: false,
-                interval: 10,
-                resend: 0,
-                nc: true,
-            });
-        }
-        TestMode::Fast => {
-            config.nodelay = Some(KcpNoDelayConfig {
-                nodelay: true,
-                interval: 10,
-                resend: 2,
-                nc: true,
-            });
-
-            config.rx_minrto = Some(10);
-            config.fast_resend = Some(1);
-        }
-    }
-
-    config
-}
 
 fn main() {
     env_logger::init();
     if std::env::args().nth(1) == Some("server".to_string()) {
         info!("Starting server ......");
-        //kcp_server();
         run_server();
     } else {
         info!("Starting client ......");
-        //kcp_client();
         run_client();
     }
 }
@@ -153,7 +109,7 @@ fn run_client(){
 
 use futures::future::err;
 
-fn kcp_server(){
+fn echo_server(){
     let mut rt = Runtime::new().unwrap();
     let addr = "127.0.0.1:12345".parse().unwrap();
     let incoming = kcp::KcpListener::bind(&addr).unwrap().incoming();
@@ -170,7 +126,7 @@ fn kcp_server(){
     rt.block_on(fut);
 }
 
-fn kcp_client(){
+fn echo_client(){
     let mut stdout = std::io::stdout();
     let (stdin_tx, stdin_rx) = mpsc::channel(0);
     std::thread::spawn(|| read_stdin(stdin_tx));
