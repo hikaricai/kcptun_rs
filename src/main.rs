@@ -1,19 +1,18 @@
-use yamux::{Config,Connection,Mode,ConnectionError,StreamHandle};
+#![allow(dead_code)]
+use yamux::{Config,Connection,Mode,StreamHandle};
 use tokio::prelude::*;
 use tokio::net::{TcpListener,TcpStream};
 use tokio::io;
 use tokio::runtime::Runtime;
 use tokio::codec::{Framed};
 use tokio_codec::BytesCodec;
-use tokio_core::reactor::Core;
+
 use futures::sync::{mpsc,oneshot};
 use std::net::SocketAddr;
-use bytes::{BytesMut, BufMut};
+use bytes::BytesMut;
 use log::{error, info};
-use tokio_kcp::{KcpSessionManager, KcpStream, KcpConfig, KcpNoDelayConfig, KcpListener};
-use ::kcptun::kcp;
-use ::kcptun::kcp::{KcpStream as ks,KcpServerStream as kss};
-use tokio_io::{AsyncRead, AsyncWrite};
+use ::kcptun::kcp::{KcpStream,KcpListener};
+use tokio_io::AsyncRead;
 
 fn main() {
     env_logger::init();
@@ -31,7 +30,7 @@ fn run_server(){
 
     let addr = "127.0.0.1:12345".parse().unwrap();
 
-    let listener = kcp::KcpListener::bind(&addr).unwrap();
+    let listener = KcpListener::bind(&addr).unwrap();
     let server = listener
         .incoming()
         .map_err(|e| eprintln!("accept failed = {:?}", e))
@@ -58,16 +57,16 @@ fn run_server(){
             tokio::spawn(fut);
             Ok(())
         });
-    rt.block_on(server);
+    rt.block_on(server).unwrap();
 }
 
-type OpenMuxStreamMess = oneshot::Sender<StreamHandle<kcp::KcpStream>>;
+type OpenMuxStreamMess = oneshot::Sender<StreamHandle<KcpStream>>;
 
 fn run_client(){
     let mut rt = Runtime::new().unwrap();
     let (tx,rx) = mpsc::channel::<OpenMuxStreamMess>(16);
 
-    let addr = "127.0.0.1:10022".parse().unwrap();
+    let addr = "127.0.0.1:2022".parse().unwrap();
     let listener = TcpListener::bind(&addr).expect("unable to bind TCP listener");
 
     let tcp_server = listener
@@ -91,28 +90,29 @@ fn run_client(){
         });
 
     let addr = "127.0.0.1:12345".parse().unwrap();
-    let mux_client = kcp::KcpStream::connect(&addr)
-        .map_err(|e|{})
+    let mux_client = KcpStream::connect(&addr)
+        .map_err(|_e|{})
         .and_then(move|kcp_stream|{
         info!("mux connected");
         let mux_conn = Connection::new(kcp_stream, Config::default(), Mode::Client);
         rx.for_each(move|mess|{
             let stream = mux_conn.open_stream().expect("ok stream").expect("not eof");
-            mess.send(stream);
+            let _ = mess.send(stream);
             info!("open mux stream");
             Ok(())
         }).map_err(|_|{})
     });
-    rt.block_on(tcp_server.join(mux_client));
+    rt.block_on(tcp_server.join(mux_client)).unwrap();
 }
 
 
-use futures::future::err;
+
+
 
 fn echo_server(){
     let mut rt = Runtime::new().unwrap();
     let addr = "127.0.0.1:12345".parse().unwrap();
-    let incoming = kcp::KcpListener::bind(&addr).unwrap().incoming();
+    let incoming = KcpListener::bind(&addr).unwrap().incoming();
     let fut = incoming.for_each(|stream|{
         let (r,w) = stream.split();
         let cp = tokio_io::io::copy(r,w).map(|size|{
@@ -123,7 +123,7 @@ fn echo_server(){
         tokio::spawn(cp);
         Ok(())
     });
-    rt.block_on(fut);
+    rt.block_on(fut).unwrap();
 }
 
 fn echo_client(){
@@ -135,7 +135,7 @@ fn echo_client(){
 
     let mut rt = Runtime::new().unwrap();
     let addr = "127.0.0.1:12345".parse().unwrap();
-    let stream_wrapper = ks::connect(&addr);
+    let stream_wrapper = KcpStream::connect(&addr);
     let fut = stream_wrapper.map_err(|_|{})
         .and_then(move|stream|{
             let (sink, stream) =  Framed::new(stream, BytesCodec::new()).split();
@@ -147,7 +147,7 @@ fn echo_client(){
             client.map_err(|_|{})
         });
 
-    rt.block_on(fut);
+    let _ = rt.block_on(fut).unwrap();
 
 }
 

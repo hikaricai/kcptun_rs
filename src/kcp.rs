@@ -1,19 +1,21 @@
+//Most copy from tokio-kcp crate
+#![allow(dead_code)]
 use tokio::prelude::*;
-use tokio::sync::mpsc::{self,channel,Sender,Receiver};
+use tokio::sync::mpsc::{self,Sender,Receiver};
 use tokio::timer::Interval;
 use futures::{Stream, Poll, Async,task};
 use udpsocket2::{UdpSocket,UdpDatagram};
 use std::net::SocketAddr;
 use std::collections::HashMap;
 use std::io::{self, Read, Write, BufRead};
-use std::cell::RefCell;
-use std::rc::Rc;
+
+
 use std::cmp;
 use tokio_io::{AsyncRead, AsyncWrite};
 use time;
-use kcp::{Error as KcpError, Kcp, KcpResult, get_conv};
+use kcp::{Error as KcpError, Kcp};
 use std::sync::{Arc, Mutex};
-use bytes::{Buf, BufMut, ByteOrder, LittleEndian};
+use bytes::{ ByteOrder, LittleEndian};
 use std::time::{Duration, Instant};
 
 /// Base Io object for KCP
@@ -62,7 +64,7 @@ impl BufRead for KcpIo {
                 let n = match self.kcp.recv(&mut self.read_buf) {
                     Ok(n) => n,
                     Err(KcpError::UserBufTooSmall) => {
-                        let orig = self.read_buf.len();
+                        let _orig = self.read_buf.len();
                         let incr = self.kcp.peeksize().unwrap_or(0).next_power_of_two();
                         //trace!("[RECV] kcp.recv buf too small, {} -> {}", orig, incr);
                         self.read_buf.resize(incr, 0);
@@ -154,7 +156,7 @@ impl Write for KcpOutput {
             peer: self.peer.clone(),
             data: buf.to_vec()
         };
-        let mut send_to = self.udp.send(data).map_err(|_|{});
+        let send_to = self.udp.send(data).map_err(|_|{});
         tokio::spawn(send_to);
         return Ok(buf.len())
     }
@@ -209,7 +211,7 @@ impl Stream for Incoming {
                         peer: datagram.peer.clone(),
                     },
                 );
-                kcp.set_mtu(1000);//the udpsocket2 only support 1024
+                kcp.set_mtu(1000).unwrap();//the udpsocket2 only support 1024
                 kcp.set_wndsize(1024,1024);
                 kcp.set_nodelay(true,10,1,false);
                 let kcp_io = KcpIo::new(kcp);
@@ -224,11 +226,11 @@ impl Stream for Incoming {
                 let tcp_flush_fut = Interval::new_interval(Duration::from_millis(10))
                     .for_each(move|_|{
                         let mut kcp_io = kcp_clone.lock().unwrap();
-                        kcp_io.kcp.update(clock());
-                        let dur = kcp_io.kcp.check(clock());
-                        kcp_io.kcp.flush();
+                        kcp_io.kcp.update(clock()).unwrap();
+                        let _dur = kcp_io.kcp.check(clock());
+                        kcp_io.kcp.flush().unwrap();
                         Ok(())
-                    }).map_err(|e_|{});
+                    }).map_err(|_e|{});
                 tokio::spawn(tcp_flush_fut);
                 return Ok(Async::Ready(Some(
                     KcpServerStream{
@@ -265,7 +267,7 @@ impl Read for KcpServerStream{
             match ret {
                 Ok(Async::Ready(Some(datagram)))=> {
                     let mut kcp_io = self.kcp.lock().unwrap();
-                    kcp_io.input(datagram.data.as_slice());
+                    kcp_io.input(datagram.data.as_slice()).unwrap();
                     let peek = kcp_io.kcp.peeksize();
                     let size = kcp_io.read(buf);
                     println!("kcp peeksize {:?}",peek);
@@ -289,8 +291,8 @@ impl Write for KcpServerStream{
         let size = kcp_io.write(buf);
         println!("write {:?}",size);
         let size = size?;
-        kcp_io.kcp.update(clock());
-        kcp_io.kcp.flush();
+        kcp_io.kcp.update(clock()).unwrap();
+        kcp_io.kcp.flush().unwrap();
         Ok(size)
     }
 
@@ -324,11 +326,11 @@ impl Future for KcpStreamWrapper {
         let tcp_flush_fut = Interval::new_interval(Duration::from_millis(10))
             .for_each(move|_|{
                 let mut kcp_io = kcp_io.lock().unwrap();
-                kcp_io.kcp.update(clock());
-                let dur = kcp_io.kcp.check(clock());
-                kcp_io.kcp.flush();
+                kcp_io.kcp.update(clock()).unwrap();
+                let _dur = kcp_io.kcp.check(clock());
+                kcp_io.kcp.flush().unwrap();
                 Ok(())
-            }).map_err(|e_|{});
+            }).map_err(|_e|{});
         tokio::spawn(tcp_flush_fut);
         Ok(Async::Ready(kcp_stream))
     }
@@ -351,7 +353,7 @@ impl KcpStream{
                 peer: addr.clone(),
             },
         );
-        kcp.set_mtu(1000);
+        kcp.set_mtu(1000).unwrap();
         kcp.set_wndsize(1024,1024);
         kcp.set_nodelay(true,10,1,false);
         let kcp_io = KcpIo::new(kcp);
@@ -374,7 +376,7 @@ impl Read for KcpStream{
                 Ok(Async::Ready(Some(datagram)))=> {
                     println!("datagram size {}",datagram.data.len());
                     let mut kcp_io = self.kcp_io.lock().unwrap();
-                    kcp_io.input(datagram.data.as_slice());
+                    kcp_io.input(datagram.data.as_slice()).unwrap();
                     let size = kcp_io.read(buf);
                     println!("kcp read {:?}",size);
                     if size.is_ok(){
@@ -396,8 +398,8 @@ impl Write for KcpStream{
         let size = kcp_io.write(buf);
         println!("write {:?}",size);
         let size = size?;
-        kcp_io.kcp.update(clock());
-        kcp_io.kcp.flush();
+        kcp_io.kcp.update(clock()).unwrap();
+        kcp_io.kcp.flush().unwrap();
         Ok(size)
     }
 

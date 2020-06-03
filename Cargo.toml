@@ -1,7 +1,6 @@
 [package]
 name = "kcptun_rs"
 version = "0.1.0"
-authors = ["Yuanhao Cai <yuanhao.cai@yitu-inc.com>"]
 edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -22,7 +21,6 @@ env_logger = "0.7.0"
 bytes = "0.4.12"
 tokio-io = "0.1.12"
 tokio-codec = "0.1.1"
-tokio_kcp = "0.7.1"
 tokio-core = "0.1.17"
 udpsocket2 = "0.0.1"
 time = "0.1.42"
